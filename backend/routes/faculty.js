@@ -1,187 +1,207 @@
 const express = require('express');
-const crypto = require('crypto');
-const auth = require('../middleware/auth');
-const Course = require('../models/Course');
-const Attendance = require('../models/Attendance');
-
 const router = express.Router();
+const Course = require('../models/Course');
+const User = require('../models/User');
+const Attendance = require('../models/Attendance');
+const auth = require('../middleware/auth');
+const crypto = require('crypto');
 
-// Active sessions storage (in production, use Redis)
+// In-memory store for active sessions
 const activeSessions = new Map();
 
-// Generate secure token
-const generateToken = () => {
-  return crypto.randomBytes(32).toString('hex');
-};
+// Helper to generate a random token
+const generateToken = () => crypto.randomBytes(8).toString('hex');
 
-// Create a new course
+// @route   POST /api/faculty/courses
+// @desc    Create a new course
 router.post('/courses', auth, async (req, res) => {
-  try {
     if (req.user.role !== 'faculty') {
-      return res.status(403).json({ message: 'Access denied. Faculty only.' });
+        return res.status(403).json({ message: 'Access denied' });
     }
-
-    const { courseName, classroomLat, classroomLon } = req.body;
-
-    const newCourse = new Course({
-      courseName,
-      faculty: req.user.id,
-      'classroomLocation.lat': classroomLat,
-      'classroomLocation.lon': classroomLon,
-    });
-
-    await newCourse.save();
-    res.status(201).json(newCourse);
-  } catch (error) {
-    console.error('Create course error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
+    try {
+        const { name, code } = req.body;
+        const newCourse = new Course({
+            name,
+            code,
+            faculty: req.user.id,
+        });
+        const course = await newCourse.save();
+        res.status(201).json(course);
+    } catch (error) {
+        console.error(error.message);
+        res.status(500).send('Server Error');
+    }
 });
 
-
-// Get faculty courses
+// @route   GET /api/faculty/courses
+// @desc    Get all courses for a faculty member
 router.get('/courses', auth, async (req, res) => {
-  try {
     if (req.user.role !== 'faculty') {
-      return res.status(403).json({ message: 'Access denied. Faculty only.' });
+        return res.status(403).json({ message: 'Access denied' });
     }
-
-    const courses = await Course.find({ faculty: req.user.id })
-      .populate('students', 'name email')
-      .populate('faculty', 'name email');
-
-    res.json(courses);
-  } catch (error) {
-    console.error('Get courses error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
+    try {
+        const courses = await Course.find({ faculty: req.user.id }).populate('students', 'name email');
+        res.json(courses);
+    } catch (error) {
+        console.error(error.message);
+        res.status(500).send('Server Error');
+    }
 });
 
-// Start attendance session
-router.post('/start-session', auth, async (req, res) => {
+// @route   POST /api/faculty/courses/:courseId/students
+// @desc    Add a student to a course
+router.post('/courses/:courseId/students', auth, async (req, res) => {
   try {
     if (req.user.role !== 'faculty') {
       return res.status(403).json({ message: 'Access denied. Faculty only.' });
     }
 
-    const { courseId } = req.body;
+    const { courseId } = req.params;
+    const { studentEmail } = req.body;
 
-    const course = await Course.findOne({
-      _id: courseId,
-      faculty: req.user.id
-    });
-
+    const course = await Course.findById(courseId);
     if (!course) {
       return res.status(404).json({ message: 'Course not found' });
     }
 
-    const sessionDate = new Date().toISOString().split('T')[0];
-    const token = generateToken();
-    const tokenExpiry = new Date(Date.now() + 10000); // 10 seconds
+    if (course.faculty.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You are not the faculty for this course' });
+    }
 
-    // Update course with session info
-    course.activeSession = {
-      isActive: true,
-      currentToken: token,
-      tokenExpiry,
-      sessionDate
-    };
+    const student = await User.findOne({ email: studentEmail, role: 'student' });
+    if (!student) {
+      return res.status(404).json({ message: 'Student not found with that email.' });
+    }
 
+    if (course.students.includes(student._id)) {
+      return res.status(400).json({ message: 'Student already enrolled in this course.' });
+    }
+
+    course.students.push(student._id);
     await course.save();
+    
+    const updatedCourse = await Course.findById(courseId).populate('students', 'name email');
 
-    // Store session data
-    activeSessions.set(courseId, {
-      token,
-      expiry: tokenExpiry,
-      sessionDate,
-      courseId
-    });
+    res.status(200).json(updatedCourse);
+  } catch (error) {
+    console.error('Add student error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 
-    // Emit initial token to faculty dashboard
-    req.io.to(`faculty-${courseId}`).emit('new-token', {
-      token,
-      expiry: tokenExpiry.toISOString()
-    });
 
-    // Set up token refresh interval
-    const refreshInterval = setInterval(async () => {
-      const session = activeSessions.get(courseId);
-      if (!session || new Date() > new Date(session.expiry)) {
-        clearInterval(refreshInterval);
+// @route   POST /api/faculty/attendance/manual
+// @desc    Manually mark attendance
+router.post('/attendance/manual', auth, async (req, res) => {
+    if (req.user.role !== 'faculty') {
+        return res.status(403).json({ message: 'Access denied' });
+    }
+    try {
+        const { courseId, studentId, sessionDate } = req.body;
 
-        // Mark session as inactive
-        await Course.findByIdAndUpdate(courseId, {
-          'activeSession.isActive': false
+        const course = await Course.findById(courseId);
+        if (!course || course.faculty.toString() !== req.user.id) {
+            return res.status(403).json({ message: 'Unauthorized action for this course.' });
+        }
+        
+        // Check if student is in the course
+        if (!course.students.includes(studentId)) {
+            return res.status(400).json({ message: 'Student is not enrolled in this course.' });
+        }
+
+        // Use today's date but clear the time part for consistency
+        const attendanceDate = new Date(sessionDate);
+        attendanceDate.setHours(0, 0, 0, 0);
+
+        // Check for duplicate attendance
+        const existingAttendance = await Attendance.findOne({
+            course: courseId,
+            student: studentId,
+            sessionDate: attendanceDate
         });
 
-        activeSessions.delete(courseId);
-        req.io.to(`faculty-${courseId}`).emit('session-ended');
-        return;
-      }
+        if (existingAttendance) {
+            return res.status(400).json({ message: 'Attendance already marked for this student today.' });
+        }
 
-      // Generate new token
-      const newToken = generateToken();
-      const newExpiry = new Date(Date.now() + 10000);
+        const attendance = new Attendance({
+            course: courseId,
+            student: studentId,
+            sessionDate: attendanceDate,
+            status: 'Present' // Marked manually
+        });
 
-      // Update course and session
-      await Course.findByIdAndUpdate(courseId, {
-        'activeSession.currentToken': newToken,
-        'activeSession.tokenExpiry': newExpiry
-      });
+        await attendance.save();
 
-      activeSessions.set(courseId, {
-        ...session,
-        token: newToken,
-        expiry: newExpiry
-      });
+        res.status(201).json(attendance);
+    } catch (error) {
+        console.error('Manual attendance error:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
 
-      // Emit new token
-      req.io.to(`faculty-${courseId}`).emit('new-token', {
-        token: newToken,
-        expiry: newExpiry.toISOString()
-      });
+
+// @route   POST /api/faculty/courses/:courseId/start-session
+// @desc    Start an attendance session
+router.post('/courses/:courseId/start-session', auth, (req, res) => {
+    if (req.user.role !== 'faculty') {
+        return res.status(403).json({ message: 'Access denied' });
+    }
+    
+    const { courseId } = req.params;
+    const io = req.io;
+
+    if (activeSessions.has(courseId)) {
+        return res.status(400).json({ message: 'Session already active for this course.' });
+    }
+
+    const initialToken = generateToken();
+    const tokenExpiry = new Date(Date.now() + 10000); // 10 seconds validity
+
+    const sessionData = {
+        token: initialToken,
+        expiry: tokenExpiry,
+        markedStudents: new Map(),
+        intervalId: null,
+        tokenCount: 1
+    };
+
+    activeSessions.set(courseId, sessionData);
+
+    const refreshInterval = setInterval(() => {
+        const currentSession = activeSessions.get(courseId);
+        if (!currentSession || currentSession.tokenCount >= 2) {
+            clearInterval(refreshInterval);
+            activeSessions.delete(courseId);
+            io.to(`faculty-${courseId}`).emit('session-ended');
+            console.log(`Session ended for course ${courseId}`);
+            return;
+        }
+
+        const newToken = generateToken();
+        const newExpiry = new Date(Date.now() + 10000);
+
+        currentSession.token = newToken;
+        currentSession.expiry = newExpiry;
+        currentSession.tokenCount += 1;
+        
+        activeSessions.set(courseId, currentSession);
+
+        io.to(`faculty-${courseId}`).emit('new-token', {
+            token: newToken,
+            expiry: newExpiry.toISOString()
+        });
+        
     }, 10000); // Refresh every 10 seconds
 
-    res.json({
-      message: 'Attendance session started',
-      sessionDate,
-      token,
-      expiry: tokenExpiry.toISOString()
+    sessionData.intervalId = refreshInterval;
+
+    res.status(200).json({
+        message: 'Session started',
+        token: initialToken,
+        expiry: tokenExpiry.toISOString(),
+        courseId,
     });
-  } catch (error) {
-    console.error('Start session error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
 });
 
-// Get attendance for a course and date
-router.get('/attendance/:courseId/:date', auth, async (req, res) => {
-  try {
-    if (req.user.role !== 'faculty') {
-      return res.status(403).json({ message: 'Access denied. Faculty only.' });
-    }
-
-    const { courseId, date } = req.params;
-
-    const course = await Course.findOne({
-      _id: courseId,
-      faculty: req.user.id
-    });
-
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
-    }
-
-    const attendance = await Attendance.find({
-      course: courseId,
-      sessionDate: date
-    }).populate('student', 'name email');
-
-    res.json(attendance);
-  } catch (error) {
-    console.error('Get attendance error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-module.exports = router;
+module.exports = { router, activeSessions };

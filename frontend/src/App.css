@@ -1,6 +1,7 @@
 .App {
   min-height: 100vh;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  text-align: center;
 }
 
 /* Loading */
@@ -401,4 +402,25 @@
   .auth-card {
     padding: 2rem;
   }
+}
+
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1050;
+}
+
+.modal-dialog {
+  z-index: 1051;
+}
+
+/* Add some spacing for faculty dashboard buttons */
+.card-body .btn {
+  margin-bottom: 5px; /* Adds space below buttons if they wrap */
 }

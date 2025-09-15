@@ -1,39 +1,28 @@
-const express = require('express');
-const http = require('http');
-const socketIo = require('socket.io');
-const cors = require('cors');
-const connectDB = require('./config/database');
 require('dotenv').config();
+const http = require('http');
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const socketIo = require('socket.io');
 
-// Import routes
 const authRoutes = require('./routes/auth');
-const facultyRoutes = require('./routes/faculty');
+const facultyRoutes = require('./routes/faculty'); // This is an object { router, activeSessions }
 const studentRoutes = require('./routes/student');
 
 const app = express();
 const server = http.createServer(app);
-
-// Get the frontend URL from environment variables for flexibility
-const frontendURL = process.env.FRONTEND_URL || "http://localhost:3000";
-const frontendIPURL = `http://${process.env.YOUR_PC_IP || '192.168.1.3'}:3000`;
-
-
-// Initialize Socket.io with a more robust CORS configuration
 const io = socketIo(server, {
   cors: {
-    origin: [frontendURL, frontendIPURL], // Allow both localhost and your specific IP
+    origin: process.env.CLIENT_URL || "http://localhost:3000",
     methods: ["GET", "POST"]
   }
 });
-
-// Connect to MongoDB
-connectDB();
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Make io accessible to routes
+// Socket.io middleware to attach io to each request
 app.use((req, res, next) => {
   req.io = io;
   next();
@@ -41,30 +30,33 @@ app.use((req, res, next) => {
 
 // Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/faculty', facultyRoutes);
+app.use('/api/faculty', facultyRoutes.router); // <-- The fix is here
 app.use('/api/student', studentRoutes);
 
-// Socket.io connection handling
+
+// Socket.io connection
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
-
-  socket.on('join-faculty-room', (courseId) => {
+  console.log('New client connected');
+  
+  socket.on('join_course_room', (courseId) => {
     socket.join(`faculty-${courseId}`);
-    console.log(`Faculty joined room: faculty-${courseId}`);
-  });
-
-  socket.on('join-student-room', (courseId) => {
-    socket.join(`student-${courseId}`);
-    console.log(`Student joined room: student-${courseId}`);
+    console.log(`A user joined room: faculty-${courseId}`);
   });
 
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
+    console.log('Client disconnected');
   });
 });
 
+// Database Connection
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('MongoDB Connected'))
+.catch(err => console.log(err));
+
 const PORT = process.env.PORT || 5000;
 
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Listen on all network interfaces
+server.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));

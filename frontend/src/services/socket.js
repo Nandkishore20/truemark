@@ -1,12 +1,26 @@
 import io from 'socket.io-client';
 
+// Use environment variable for backend URL, with a fallback for local development
 const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000';
 
 class SocketService {
-  socket = null;
+  socket;
 
   connect() {
-    this.socket = io(SOCKET_URL);
+    if (!this.socket) {
+      this.socket = io(SOCKET_URL, {
+        transports: ['websocket'],
+        reconnectionAttempts: 5,
+      });
+      
+      this.socket.on('connect', () => {
+        console.log('Socket connected:', this.socket.id);
+      });
+
+      this.socket.on('connect_error', (err) => {
+        console.error('Socket connection error:', err.message);
+      });
+    }
     return this.socket;
   }
 
@@ -17,41 +31,13 @@ class SocketService {
     }
   }
 
-  joinFacultyRoom(courseId) {
-    if (this.socket) {
-      this.socket.emit('join-faculty-room', courseId);
+  getSocket() {
+    if (!this.socket) {
+      return this.connect();
     }
-  }
-
-  joinStudentRoom(courseId) {
-    if (this.socket) {
-      this.socket.emit('join-student-room', courseId);
-    }
-  }
-
-  onNewToken(callback) {
-    if (this.socket) {
-      this.socket.on('new-token', callback);
-    }
-  }
-
-  onStudentPresent(callback) {
-    if (this.socket) {
-      this.socket.on('student-present', callback);
-    }
-  }
-
-  onSessionEnded(callback) {
-    if (this.socket) {
-      this.socket.on('session-ended', callback);
-    }
-  }
-
-  removeAllListeners() {
-    if (this.socket) {
-      this.socket.removeAllListeners();
-    }
+    return this.socket;
   }
 }
 
-export default new SocketService();
+const socketService = new SocketService();
+export default socketService;

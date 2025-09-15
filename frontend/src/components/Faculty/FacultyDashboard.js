@@ -1,209 +1,176 @@
-import React, { useState, useEffect } from 'react';
-import QRCode from 'qrcode.react';
-import api from '../../services/api';
-import socketService from '../../services/socket';
+import React, { useState, useEffect, useMemo } from 'react';
+import { getFacultyCourses, startAttendanceSession } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
+import CreateCourseModal from './CreateCourseModal';
+import AddStudentModal from './AddStudentModal';
+import ManualAttendanceModal from './ManualAttendanceModal';
 import LiveAttendanceList from './LiveAttendanceList';
-import CreateCourseModal from './CreateCourseModal'; // Import the new component
+import QRCode from 'qrcode.react';
+import socketService from '../../services/socket';
 
 const FacultyDashboard = () => {
-  const [courses, setCourses] = useState([]);
-  const [activeSession, setActiveSession] = useState(null);
-  const [currentToken, setCurrentToken] = useState('');
-  const [tokenExpiry, setTokenExpiry] = useState(null);
-  const [countdown, setCountdown] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [attendanceList, setAttendanceList] = useState([]);
-  const [isModalOpen, setIsModalOpen] = useState(false); // State for the modal
+    const { user } = useAuth();
+    const [courses, setCourses] = useState([]);
+    const [error, setError] = useState('');
+    const [isCreateModalOpen, setCreateModalOpen] = useState(false);
+    const [isAddStudentModalOpen, setAddStudentModalOpen] = useState(false);
+    const [isManualAttendanceModalOpen, setManualAttendanceModalOpen] = useState(false);
+    const [selectedCourse, setSelectedCourse] = useState(null);
 
-  useEffect(() => {
-    fetchCourses();
-    initializeSocket();
+    const [activeSession, setActiveSession] = useState(null);
+    const [currentToken, setCurrentToken] = useState('');
+    // const [tokenExpiry, setTokenExpiry] = useState(''); // <-- REMOVED
 
-    return () => {
-      socketService.removeAllListeners();
-      socketService.disconnect();
-    };
-  }, []);
-
-  // Countdown timer for token expiry
-  useEffect(() => {
-    let interval;
-    if (tokenExpiry) {
-      interval = setInterval(() => {
-        const now = new Date().getTime();
-        const expiryTime = new Date(tokenExpiry).getTime();
-        const timeLeft = Math.max(0, Math.ceil((expiryTime - now) / 1000));
-        setCountdown(timeLeft);
-
-        if (timeLeft === 0) {
-          clearInterval(interval);
+    const fetchCourses = async () => {
+        try {
+            const res = await getFacultyCourses();
+            setCourses(res.data);
+        } catch (err) {
+            setError('Failed to fetch courses.');
+            console.error(err);
         }
-      }, 1000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
     };
-  }, [tokenExpiry]);
 
-  const initializeSocket = () => {
-    socketService.connect();
+    useEffect(() => {
+        fetchCourses();
+        const socket = socketService.getSocket();
 
-    socketService.onNewToken((data) => {
-      setCurrentToken(data.token);
-      setTokenExpiry(data.expiry);
-    });
+        socket.on('new-token', ({ token, expiry }) => {
+            setCurrentToken(token);
+            // setTokenExpiry(expiry); // <-- REMOVED
+        });
 
-    socketService.onStudentPresent((data) => {
-      setAttendanceList(prev => [...prev, data]);
-    });
+        socket.on('session-ended', () => {
+            setActiveSession(null);
+            setCurrentToken('');
+            alert('Attendance session has ended.');
+        });
+        
+        return () => {
+            socket.off('new-token');
+            socket.off('session-ended');
+        };
+    }, []);
 
-    socketService.onSessionEnded(() => {
-      setActiveSession(null);
-      setCurrentToken('');
-      setTokenExpiry(null);
-      setCountdown(0);
-    });
-  };
+    const handleStartSession = async (courseId) => {
+        try {
+            const res = await startAttendanceSession(courseId);
+            setActiveSession({ courseId });
+            setCurrentToken(res.data.token);
+            // setTokenExpiry(res.data.expiry); // <-- REMOVED
+            socketService.getSocket().emit('join_course_room', courseId);
+        } catch (err) {
+            setError(err.response?.data?.message || 'Failed to start session.');
+        }
+    };
 
-  const fetchCourses = async () => {
-    try {
-      const response = await api.get('/faculty/courses');
-      setCourses(response.data);
-    } catch (error) {
-      console.error('Error fetching courses:', error);
-      setError('Failed to load courses');
-    } finally {
-      setLoading(false);
-    }
-  };
+    const openAddStudentModal = (course) => {
+        setSelectedCourse(course);
+        setAddStudentModalOpen(true);
+    };
 
-  const startSession = async (courseId, courseName) => {
-    try {
-      setError('');
-      const response = await api.post('/faculty/start-session', { courseId });
-
-      setActiveSession({ courseId, courseName });
-      setCurrentToken(response.data.token);
-      setTokenExpiry(response.data.expiry);
-      setAttendanceList([]);
-
-      // Join socket room for this course
-      socketService.joinFacultyRoom(courseId);
-
-    } catch (error) {
-      console.error('Error starting session:', error);
-      setError(error.response?.data?.message || 'Failed to start session');
-    }
-  };
-
-  const endSession = () => {
-    setActiveSession(null);
-    setCurrentToken('');
-    setTokenExpiry(null);
-    setCountdown(0);
-    setAttendanceList([]);
-  };
-
-  const handleCourseCreated = (newCourse) => {
-    setCourses([...courses, newCourse]);
-    setIsModalOpen(false);
-  };
+    const openManualAttendanceModal = (course) => {
+        setSelectedCourse(course);
+        setManualAttendanceModalOpen(true);
+    };
+    
+    const qrCodeValue = useMemo(() => {
+        if (!currentToken || !activeSession?.courseId) return '';
+        return JSON.stringify({
+            token: currentToken,
+            courseId: activeSession.courseId,
+            timestamp: Date.now()
+        });
+    }, [currentToken, activeSession]);
 
 
-  if (loading) {
     return (
-      <div className="loading-container">
-        <div className="loading-spinner"></div>
-        <p>Loading courses...</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="dashboard">
-      <h1 className="dashboard-title">Faculty Dashboard</h1>
-
-      {error && (
-        <div className="message error">
-          {error}
-        </div>
-      )}
-
-      {!activeSession ? (
-        <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
-            <h2 style={{ color: 'white' }}>Select a Course to Start Attendance</h2>
-            <button className="btn btn-success" onClick={() => setIsModalOpen(true)}>
-              Create New Course
+        <div className="container mt-4">
+            <h2>Faculty Dashboard</h2>
+            <p>Welcome, {user?.name}</p>
+            {error && <div className="alert alert-danger">{error}</div>}
+            
+            <button className="btn btn-primary mb-3" onClick={() => setCreateModalOpen(true)}>
+                Create New Course
             </button>
-          </div>
-          <div className="courses-grid">
-            {courses.map(course => (
-              <div key={course._id} className="course-card">
-                <h3 className="course-name">{course.courseName}</h3>
-                <div className="course-info">
-                  <p>Students Enrolled: {course.students.length}</p>
-                  <p>Location: {course.classroomLocation.lat.toFixed(4)}, {course.classroomLocation.lon.toFixed(4)}</p>
-                </div>
-                <div className="course-actions">
-                  <button
-                    className="btn btn-primary"
-                    onClick={() => startSession(course._id, course.courseName)}
-                  >
-                    Start Attendance Session
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div>
-          <div className="qr-section">
-            <h3>Active Session: {activeSession.courseName}</h3>
 
-            {currentToken && (
-              <div>
-                <div className="qr-code">
-                  <QRCode
-                    value={JSON.stringify({
-                      token: currentToken,
-                      courseId: activeSession.courseId,
-                      timestamp: Date.now()
-                    })}
-                    size={256}
-                    level="H"
-                  />
+            {activeSession && (
+                <div className="card mb-4">
+                    <div className="card-header">Live Attendance Session</div>
+                    <div className="card-body text-center">
+                        <p>Scan the QR code to mark your attendance.</p>
+                        {qrCodeValue && <QRCode value={qrCodeValue} size={256} level="H" />}
+                        <p className="mt-3">
+                            <small>This QR code is valid for 10 seconds.</small>
+                        </p>
+                    </div>
+                    <div className="card-footer">
+                        <LiveAttendanceList courseId={activeSession.courseId} />
+                    </div>
                 </div>
-
-                <div className="session-info">
-                  <p>Token expires in: <span className="countdown">{countdown}s</span></p>
-                  <p>Students scan this QR code to mark attendance</p>
-                  <button
-                    className="btn btn-danger"
-                    onClick={endSession}
-                    style={{ marginTop: '1rem' }}
-                  >
-                    End Session
-                  </button>
-                </div>
-              </div>
             )}
-          </div>
 
-          <LiveAttendanceList attendanceList={attendanceList} />
+            <h3>Your Courses</h3>
+            <div className="row">
+                {courses.length > 0 ? (
+                    courses.map(course => (
+                        <div key={course._id} className="col-md-6 col-lg-4 mb-3">
+                            <div className="card">
+                                <div className="card-body">
+                                    <h5 className="card-title">{course.name}</h5>
+                                    <h6 className="card-subtitle mb-2 text-muted">{course.code}</h6>
+                                    <p className="card-text">{course.students.length} student(s) enrolled.</p>
+                                    <button
+                                        className="btn btn-success me-2"
+                                        onClick={() => handleStartSession(course._id)}
+                                        disabled={!!activeSession}
+                                    >
+                                        Start Attendance
+                                    </button>
+                                    <button
+                                        className="btn btn-info me-2"
+                                        onClick={() => openAddStudentModal(course)}
+                                    >
+                                        Add Student
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary"
+                                        onClick={() => openManualAttendanceModal(course)}
+                                    >
+                                        Manual Attendance
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    ))
+                ) : (
+                    <p>You have not created any courses yet.</p>
+                )}
+            </div>
+
+            {isCreateModalOpen && (
+                <CreateCourseModal
+                    onClose={() => setCreateModalOpen(false)}
+                    onCourseCreated={fetchCourses}
+                />
+            )}
+            
+            {isAddStudentModalOpen && selectedCourse && (
+                <AddStudentModal
+                    course={selectedCourse}
+                    onClose={() => setAddStudentModalOpen(false)}
+                    onStudentAdded={fetchCourses}
+                />
+            )}
+
+            {isManualAttendanceModalOpen && selectedCourse && (
+                <ManualAttendanceModal
+                    course={selectedCourse}
+                    onClose={() => setManualAttendanceModalOpen(false)}
+                />
+            )}
         </div>
-      )}
-      {isModalOpen && (
-        <CreateCourseModal
-          onClose={() => setIsModalOpen(false)}
-          onCourseCreated={handleCourseCreated}
-        />
-      )}
-    </div>
-  );
+    );
 };
 
 export default FacultyDashboard;
